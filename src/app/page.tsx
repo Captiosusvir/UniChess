@@ -38,6 +38,7 @@ class StockfishEngine {
   private worker: any = null
   private ready = false
   private resolveReady: ((ready: boolean) => void) | null = null
+  private messageHandler: ((msg: string) => void) | null = null
 
   async init(): Promise<boolean> {
     if (typeof window === 'undefined') return false
@@ -45,8 +46,9 @@ class StockfishEngine {
     return new Promise((resolve) => {
       this.resolveReady = resolve
       
+      // Use lichess stockfish.js from CDN
       const script = document.createElement('script')
-      script.src = 'https://cdn.jsdelivr.net/npm/stockfish@10.0.1/stockfish.js'
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/7.0.0/stockfish.js'
       script.crossOrigin = 'anonymous'
       
       script.onload = () => {
@@ -57,7 +59,7 @@ class StockfishEngine {
           if (this.worker) {
             this.worker.onmessage = (e: MessageEvent) => {
               const msg = String(e.data)
-              console.log('SF msg:', msg.substring(0, 50))
+              console.log('SF msg:', msg.substring(0, 80))
               if (msg.includes('uciok') && !this.ready) {
                 this.ready = true
                 if (this.resolveReady) {
@@ -65,21 +67,19 @@ class StockfishEngine {
                   this.resolveReady = null
                 }
               }
+              // Pass messages to handler
+              if (this.messageHandler) {
+                this.messageHandler(msg)
+              }
             }
             this.worker.postMessage('uci')
-            // Timeout fallback
+            // Wait for uciok
             setTimeout(() => {
-              if (!this.ready && this.resolveReady) {
-                console.log('Stockfish ready timeout, checking worker...')
-                if (this.worker) {
-                  this.ready = true
-                  this.resolveReady(true)
-                } else {
-                  this.resolveReady(false)
-                }
+              if (this.ready && this.resolveReady) {
+                this.resolveReady(true)
                 this.resolveReady = null
               }
-            }, 3000)
+            }, 2000)
           } else {
             console.log('No stockfish worker created')
             resolve(false)
@@ -100,24 +100,31 @@ class StockfishEngine {
   }
 
   start(fen: string, depth: number, skillLevel: number, onMove: (move: string) => void) {
-    if (!this.worker) {
-      console.log('Stockfish not available')
+    if (!this.worker || !this.ready) {
+      console.log('Stockfish not ready, using fallback')
       return
     }
 
+    console.log('Stockfish thinking... skill:', skillLevel, 'depth:', depth)
+    
+    // Set skill level
     this.worker.postMessage('setoption name Skill Level value ' + skillLevel)
     this.worker.postMessage('position fen ' + fen)
     this.worker.postMessage('go depth ' + depth)
 
-    this.worker.onmessage = (e: MessageEvent) => {
-      const msg = String(e.data)
+    // Set up one-time message handler
+    const handler = (msg: string) => {
       if (msg.startsWith('bestmove')) {
         const move = msg.split(' ')[1]
         if (move && move !== '(none)') {
+          console.log('Stockfish move:', move)
           onMove(move)
         }
+        // Remove handler after getting best move
+        this.messageHandler = null
       }
     }
+    this.messageHandler = handler
   }
 
   isReady(): boolean {
