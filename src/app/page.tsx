@@ -421,6 +421,27 @@ export default function ChessApp() {
     return null
   }
 
+  // Login screen
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-800 text-white flex items-center justify-center">
+        <div className="bg-slate-800 rounded-2xl p-8 border border-slate-700 text-center max-w-md">
+          <div className="text-6xl mb-4">♟️</div>
+          <h1 className="text-3xl font-bold bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent mb-2">
+            ChessVerse
+          </h1>
+          <p className="text-slate-400 mb-6">Sign in to play chess against AI bots</p>
+          <button 
+            onClick={() => window.netlifyIdentity.open()}
+            className="w-full py-3 bg-gradient-to-r from-amber-500 to-orange-600 rounded-lg font-medium hover:from-amber-400 hover:to-orange-500"
+          >
+            Sign Up / Login
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-800 text-white">
       {/* Header */}
