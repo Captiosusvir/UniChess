@@ -33,7 +33,7 @@ const BOTS: Bot[] = [
   { id: 'stockfish', name: 'Stockfish', rating: 3200, avatar: '♛', desc: 'World引擎', skill: 20 },
 ]
 
-// Stockfish Engine class - uses Web Worker for better Safari compatibility
+// Stockfish Engine class - uses local file for better compatibility
 class StockfishEngine {
   private worker: any = null
   private ready = false
@@ -46,40 +46,63 @@ class StockfishEngine {
       this.resolveReady = resolve
       
       try {
-        // Create worker from CDN - using nmrugg version which has better Safari support
-        this.worker = new Worker('https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js')
+        // Use local stockfish.js
+        const script = document.createElement('script')
+        script.src = '/stockfish.js'
         
-        this.worker.onmessage = (e: MessageEvent) => {
-          const msg = String(e.data)
-          console.log('SF:', msg.substring(0, 60))
-          if (msg.includes('uciok') && !this.ready) {
-            this.ready = true
-            if (this.resolveReady) {
-              this.resolveReady(true)
-              this.resolveReady = null
+        script.onload = () => {
+          console.log('Stockfish script loaded')
+          try {
+            // @ts-ignore - stockfish is loaded as global
+            const stockfishFn = window.stockfish
+            if (stockfishFn) {
+              this.worker = stockfishFn()
+              
+              this.worker.onmessage = (e: MessageEvent) => {
+                const msg = String(e.data)
+                console.log('SF:', msg.substring(0, 60))
+                if (msg.includes('uciok') && !this.ready) {
+                  this.ready = true
+                  if (this.resolveReady) {
+                    this.resolveReady(true)
+                    this.resolveReady = null
+                  }
+                }
+              }
+              
+              this.worker.onerror = (e: ErrorEvent) => {
+                console.error('Stockfish worker error:', e)
+              }
+              
+              this.worker.postMessage('uci')
+              
+              // Wait for ready
+              setTimeout(() => {
+                if (this.ready && this.resolveReady) {
+                  this.resolveReady(true)
+                  this.resolveReady = null
+                } else if (this.resolveReady) {
+                  this.ready = true
+                  this.resolveReady(true)
+                  this.resolveReady = null
+                }
+              }, 3000)
+            } else {
+              console.log('No stockfish function')
+              resolve(false)
             }
+          } catch (e) {
+            console.error('Stockfish init error:', e)
+            resolve(false)
           }
         }
         
-        this.worker.onerror = (e: ErrorEvent) => {
-          console.error('Stockfish worker error:', e)
+        script.onerror = (e) => {
+          console.error('Failed to load Stockfish script:', e)
           resolve(false)
         }
         
-        this.worker.postMessage('uci')
-        
-        // Wait for ready
-        setTimeout(() => {
-          if (this.ready && this.resolveReady) {
-            this.resolveReady(true)
-            this.resolveReady = null
-          } else if (this.resolveReady) {
-            // Try anyway if no error
-            this.ready = true
-            this.resolveReady(true)
-            this.resolveReady = null
-          }
-        }, 3000)
+        document.head.appendChild(script)
         
       } catch (e) {
         console.error('Stockfish init error:', e)
@@ -89,8 +112,8 @@ class StockfishEngine {
   }
 
   start(fen: string, depth: number, skillLevel: number, onMove: (move: string) => void) {
-    if (!this.worker) {
-      console.log('Stockfish not available')
+    if (!this.worker || !this.ready) {
+      console.log('Stockfish not ready')
       return
     }
 
