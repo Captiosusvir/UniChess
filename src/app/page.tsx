@@ -5,8 +5,15 @@ import { Chess } from 'chess.js'
 import { ChessBoard } from './components/ChessBoard'
 import {
   RotateCcw, Play, Pause, Settings, Users, Trophy, Brain,
-  ChevronRight, AlertTriangle, Target, Zap, Flag, Hand
+  ChevronRight, AlertTriangle, Target, Zap, Flag, Hand, LogIn, LogOut
 } from 'lucide-react'
+
+// Netlify Identity types
+declare global {
+  interface Window {
+    netlifyIdentity: any
+  }
+}
 
 // Bot definitions
 type Bot = {
@@ -218,11 +225,27 @@ export default function ChessApp() {
   const [showSettings, setShowSettings] = useState(false)
   const [variant, setVariant] = useState('chess')
   const [showResignMenu, setShowResignMenu] = useState(false)
+  const [user, setUser] = useState<any>(null)
 
   const stockfishRef = useRef<StockfishEngine | null>(null)
 
-  // Initialize Stockfish once
+  // Initialize Netlify Identity and Stockfish
   useEffect(() => {
+    // Netlify Identity init
+    if (typeof window !== 'undefined' && window.netlifyIdentity) {
+      window.netlifyIdentity.on('login', (user: any) => {
+        setUser(user)
+        window.netlifyIdentity.close()
+      })
+      window.netlifyIdentity.on('logout', () => {
+        setUser(null)
+      })
+      // Check if already logged in
+      const currentUser = window.netlifyIdentity.currentUser()
+      if (currentUser) setUser(currentUser)
+    }
+    
+    // Stockfish init
     stockfishRef.current = new StockfishEngine()
     stockfishRef.current.init().then(ok => {
       console.log('Stockfish loaded:', ok)
@@ -408,6 +431,27 @@ export default function ChessApp() {
             <h1 className="text-lg font-bold bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent">
               ChessVerse
             </h1>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {user ? (
+              <>
+                <span className="text-sm text-slate-400">{user.email}</span>
+                <button 
+                  onClick={() => window.netlifyIdentity.logout()}
+                  className="flex items-center gap-1 px-3 py-1.5 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-lg text-sm"
+                >
+                  <LogOut size={14} /> Logout
+                </button>
+              </>
+            ) : (
+              <button 
+                onClick={() => window.netlifyIdentity.open()}
+                className="flex items-center gap-1 px-3 py-1.5 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-lg text-sm"
+              >
+                <LogIn size={14} /> Login
+              </button>
+            )}
           </div>
           
           {gameStatus === 'playing' && (
