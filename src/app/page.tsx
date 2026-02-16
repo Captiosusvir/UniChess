@@ -33,114 +33,113 @@ const BOTS: Bot[] = [
   { id: 'stockfish', name: 'Stockfish', rating: 3200, avatar: '♛', desc: 'World引擎', skill: 20 },
 ]
 
-// Stockfish Engine class - uses local file for better compatibility
+// Stockfish Engine class - uses Web Worker
 class StockfishEngine {
-  private worker: any = null
+  private worker: Worker | null = null
   private ready = false
-  private resolveReady: ((ready: boolean) => void) | null = null
+  private messageQueue: string[] = []
 
   async init(): Promise<boolean> {
     if (typeof window === 'undefined') return false
 
     return new Promise((resolve) => {
-      this.resolveReady = resolve
-      
       try {
-        // Use local stockfish.js
-        const script = document.createElement('script')
-        script.src = '/stockfish.js'
+        // Create worker directly from stockfish.js
+        this.worker = new Worker('/stockfish.js')
         
-        script.onload = () => {
-          console.log('Stockfish script loaded')
-          try {
-            // @ts-ignore - stockfish is loaded as global
-            const stockfishFn = window.stockfish
-            if (stockfishFn) {
-              this.worker = stockfishFn()
-              
-              this.worker.onmessage = (e: MessageEvent) => {
-                const msg = String(e.data)
-                console.log('SF:', msg.substring(0, 60))
-                if (msg.includes('uciok') && !this.ready) {
-                  this.ready = true
-                  if (this.resolveReady) {
-                    this.resolveReady(true)
-                    this.resolveReady = null
-                  }
-                }
-              }
-              
-              this.worker.onerror = (e: ErrorEvent) => {
-                console.error('Stockfish worker error:', e)
-              }
-              
-              this.worker.postMessage('uci')
-              
-              // Wait for ready
-              setTimeout(() => {
-                if (this.ready && this.resolveReady) {
-                  this.resolveReady(true)
-                  this.resolveReady = null
-                } else if (this.resolveReady) {
-                  this.ready = true
-                  this.resolveReady(true)
-                  this.resolveReady = null
-                }
-              }, 3000)
-            } else {
-              console.log('No stockfish function')
-              resolve(false)
-            }
-          } catch (e) {
-            console.error('Stockfish init error:', e)
-            resolve(false)
+        this.worker.onmessage = (e: MessageEvent) => {
+          const msg = String(e.data)
+          console.log('[SF]', msg.substring(0, 80))
+          
+          if (msg.includes('uciok') && !this.ready) {
+            console.log('[SF] Engine ready!')
+            this.ready = true
+            // Send queued messages
+            this.messageQueue.forEach(m => this.worker?.postMessage(m))
+            this.messageQueue = []
+            resolve(true)
           }
         }
         
-        script.onerror = (e) => {
-          console.error('Failed to load Stockfish script:', e)
+        this.worker.onerror = (e: ErrorEvent) => {
+          console.error('[SF] Worker error:', e)
           resolve(false)
         }
         
-        document.head.appendChild(script)
+        this.worker.postMessage('uci')
+        
+        // Timeout fallback
+        setTimeout(() => {
+          if (!this.ready) {
+            console.error('[SF] Init timeout')
+            resolve(false)
+          }
+        }, 5000)
         
       } catch (e) {
-        console.error('Stockfish init error:', e)
+        console.error('[SF] Init error:', e)
         resolve(false)
       }
     })
   }
 
-  start(fen: string, depth: number, skillLevel: number, onMove: (move: string) => void) {
-    if (!this.worker || !this.ready) {
-      console.log('Stockfish not ready')
+  start(fen: string, timeMs: number, skillLevel: number, onMove: (move: string) => void) {
+    if (!this.worker) {
+      console.log('[SF] Worker not initialized')
       return
     }
 
-    console.log('Stockfish thinking... skill:', skillLevel, 'depth:', depth)
+    console.log('[SF] Starting analysis - Skill:', skillLevel, 'Time:', timeMs, 'ms')
     
-    this.worker.postMessage('setoption name Skill Level value ' + skillLevel)
-    this.worker.postMessage('position fen ' + fen)
-    this.worker.postMessage('go depth ' + depth)
+    // Configure strength based on skill level
+    if (skillLevel >= 20) {
+      // Maximum strength - Stockfish at full power
+      this.send('setoption name UCI_LimitStrength value false')
+      this.send('setoption name Skill Level value 20')
+    } else {
+      // Limited strength - use both Skill Level and UCI_Elo
+      this.send('setoption name UCI_LimitStrength value true')
+      this.send(`setoption name UCI_Elo value ${800 + skillLevel * 100}`)
+      this.send(`setoption name Skill Level value ${skillLevel}`)
+    }
+    
+    this.send('position fen ' + fen)
+    this.send(`go movetime ${timeMs}`)
 
-    // Set up one-time handler
-    const handler = (e: MessageEvent) => {
+    // Set up one-time handler for bestmove
+    const originalHandler = this.worker.onmessage
+    this.worker.onmessage = (e: MessageEvent) => {
       const msg = String(e.data)
+      console.log('[SF]', msg.substring(0, 80))
+      
       if (msg.startsWith('bestmove')) {
         const move = msg.split(' ')[1]
         if (move && move !== '(none)') {
-          console.log('Stockfish move:', move)
+          console.log('[SF] Best move:', move)
           onMove(move)
         }
-        // Remove listener
-        this.worker?.removeEventListener('message', handler)
+        // Restore original handler
+        if (this.worker) this.worker.onmessage = originalHandler
       }
     }
-    this.worker.addEventListener('message', handler)
+  }
+
+  private send(cmd: string) {
+    if (!this.ready) {
+      this.messageQueue.push(cmd)
+    } else {
+      this.worker?.postMessage(cmd)
+    }
   }
 
   isReady(): boolean {
     return this.ready
+  }
+
+  destroy() {
+    this.worker?.postMessage('quit')
+    this.worker?.terminate()
+    this.worker = null
   }
 }
 
@@ -338,12 +337,24 @@ export default function ChessApp() {
       
       // Small delay for visual feedback
       setTimeout(() => {
-        const depth = Math.max(10, 20 - bot.skill * 0.3) // Higher skill = deeper search
+        // Calculate think time based on rating (not linear)
+        // Rookie: 100ms, Club: 300ms, Master: 800ms, GM: 1500ms, Stockfish: 3000ms
+        let thinkTime: number
+        if (bot.skill <= 5) {
+          thinkTime = 100 + bot.skill * 40  // 100-300ms for weak bots
+        } else if (bot.skill <= 10) {
+          thinkTime = 300 + (bot.skill - 5) * 100  // 300-800ms for intermediate
+        } else if (bot.skill <= 15) {
+          thinkTime = 800 + (bot.skill - 10) * 140  // 800-1500ms for advanced
+        } else {
+          thinkTime = 1500 + (bot.skill - 15) * 300  // 1500-3000ms for top
+        }
         
         if (stockfishRef.current?.isReady()) {
-          stockfishRef.current.start(game.fen(), Math.floor(depth), bot.skill, handleBotMove)
+          stockfishRef.current.start(game.fen(), thinkTime, bot.skill, handleBotMove)
         } else {
           // Fallback if Stockfish not loaded
+          console.log('[SF] Not ready, using fallback move')
           const move = findFallbackMove(game)
           handleBotMove(move)
         }
@@ -440,26 +451,26 @@ export default function ChessApp() {
     return null
   }
 
-  // Login screen
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-800 text-white flex items-center justify-center">
-        <div className="bg-slate-800 rounded-2xl p-8 border border-slate-700 text-center max-w-md">
-          <div className="text-6xl mb-4">♟️</div>
-          <h1 className="text-3xl font-bold bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent mb-2">
-            ChessVerse
-          </h1>
-          <p className="text-slate-400 mb-6">Sign in to play chess against AI bots</p>
-          <button 
-            onClick={() => window.netlifyIdentity.open()}
-            className="w-full py-3 bg-gradient-to-r from-amber-500 to-orange-600 rounded-lg font-medium hover:from-amber-400 hover:to-orange-500"
-          >
-            Sign Up / Login
-          </button>
-        </div>
-      </div>
-    )
-  }
+  // Login screen - TEMPORARILY DISABLED FOR TESTING
+  // if (!user) {
+  //   return (
+  //     <div className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-800 text-white flex items-center justify-center">
+  //       <div className="bg-slate-800 rounded-2xl p-8 border border-slate-700 text-center max-w-md">
+  //         <div className="text-6xl mb-4">♟️</div>
+  //         <h1 className="text-3xl font-bold bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent mb-2">
+  //           ChessVerse
+  //         </h1>
+  //         <p className="text-slate-400 mb-6">Sign in to play chess against AI bots</p>
+  //         <button 
+  //           onClick={() => window.netlifyIdentity.open()}
+  //           className="w-full py-3 bg-gradient-to-r from-amber-500 to-orange-600 rounded-lg font-medium hover:from-amber-400 hover:to-orange-500"
+  //         >
+  //           Sign Up / Login
+  //         </button>
+  //       </div>
+  //     </div>
+  //   )
+  // }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-800 text-white">

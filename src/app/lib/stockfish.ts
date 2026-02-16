@@ -21,29 +21,34 @@ export class StockfishEngine {
 
     return new Promise((resolve) => {
       try {
-        // Use stockfish.js from CDN via blob worker
-        const code = `importScripts('https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js');`
+        // Use local stockfish.js via blob worker
+        const code = `importScripts('/stockfish.js');`
         const blob = new Blob([code], { type: 'application/javascript' })
         this.worker = new Worker(URL.createObjectURL(blob))
 
         this.worker.onmessage = (e: MessageEvent) => {
+          console.log('[Stockfish]', e.data)
           this.handleMessage(String(e.data))
         }
 
-        this.worker.onerror = () => {
-          console.warn('Stockfish CDN failed, using fallback eval')
+        this.worker.onerror = (err) => {
+          console.error('[Stockfish] Worker error:', err)
+          console.warn('Stockfish failed to load, using fallback eval')
           this.worker = null
           resolve(false)
         }
 
         // UCI init
+        console.log('[Stockfish] Sending UCI command')
         this.send('uci')
 
         // Wait for uciok
         const origHandler = this.worker.onmessage
         this.worker.onmessage = (e: MessageEvent) => {
           const msg = String(e.data)
+          console.log('[Stockfish] Init message:', msg)
           if (msg === 'uciok') {
+            console.log('[Stockfish] Engine ready!')
             this.ready = true
             this.worker!.onmessage = origHandler
             this.send('setoption name Threads value 1')
@@ -56,11 +61,13 @@ export class StockfishEngine {
         // Timeout fallback
         setTimeout(() => {
           if (!this.ready) {
+            console.error('[Stockfish] Init timeout - no uciok received')
             this.worker = null
             resolve(false)
           }
         }, 5000)
-      } catch {
+      } catch (err) {
+        console.error('[Stockfish] Init exception:', err)
         this.worker = null
         resolve(false)
       }
@@ -107,6 +114,7 @@ export class StockfishEngine {
 
   analyze(fen: string, depth = 20) {
     if (!this.worker) {
+      console.log('[Stockfish] analyze() - no worker, using fallback')
       // Fallback evaluation
       this.onAnalysis?.({
         depth,
@@ -117,6 +125,7 @@ export class StockfishEngine {
       })
       return
     }
+    console.log('[Stockfish] analyze() - depth:', depth)
     this.send('stop')
     this.send(`position fen ${fen}`)
     this.send(`go depth ${depth}`)
@@ -125,23 +134,37 @@ export class StockfishEngine {
   findBestMove(fen: string, depth = 12, skillLevel = 20): Promise<string | null> {
     return new Promise((resolve) => {
       if (!this.worker) {
+        console.log('[Stockfish] findBestMove() - no worker available')
         resolve(null)
         return
       }
+      console.log('[Stockfish] findBestMove() - depth:', depth, 'skill:', skillLevel)
       this.send('stop')
       this.setSkillLevel(skillLevel)
       this.send(`position fen ${fen}`)
 
       const prevCallback = this.onBestMove
+      let resolved = false
       this.onBestMove = (move: string) => {
-        this.onBestMove = prevCallback
-        resolve(move)
+        if (!resolved) {
+          console.log('[Stockfish] Best move found:', move)
+          resolved = true
+          this.onBestMove = prevCallback
+          resolve(move)
+        }
       }
 
       this.send(`go depth ${depth}`)
 
       // Safety timeout
-      setTimeout(() => resolve(null), 10000)
+      setTimeout(() => {
+        if (!resolved) {
+          console.warn('[Stockfish] findBestMove() timed out after 10s')
+          resolved = true
+          this.onBestMove = prevCallback
+          resolve(null)
+        }
+      }, 10000)
     })
   }
 
