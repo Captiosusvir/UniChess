@@ -33,12 +33,11 @@ const BOTS: Bot[] = [
   { id: 'stockfish', name: 'Stockfish', rating: 3200, avatar: '♛', desc: 'World引擎', skill: 20 },
 ]
 
-// Stockfish Engine class
+// Stockfish Engine class - uses Web Worker for better Safari compatibility
 class StockfishEngine {
   private worker: any = null
   private ready = false
   private resolveReady: ((ready: boolean) => void) | null = null
-  private messageHandler: ((msg: string) => void) | null = null
 
   async init(): Promise<boolean> {
     if (typeof window === 'undefined') return false
@@ -46,85 +45,75 @@ class StockfishEngine {
     return new Promise((resolve) => {
       this.resolveReady = resolve
       
-      // Use lichess stockfish.js from CDN
-      const script = document.createElement('script')
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/7.0.0/stockfish.js'
-      script.crossOrigin = 'anonymous'
-      
-      script.onload = () => {
-        console.log('Stockfish script loaded')
-        try {
-          // @ts-ignore
-          this.worker = window.stockfish()
-          if (this.worker) {
-            this.worker.onmessage = (e: MessageEvent) => {
-              const msg = String(e.data)
-              console.log('SF msg:', msg.substring(0, 80))
-              if (msg.includes('uciok') && !this.ready) {
-                this.ready = true
-                if (this.resolveReady) {
-                  this.resolveReady(true)
-                  this.resolveReady = null
-                }
-              }
-              // Pass messages to handler
-              if (this.messageHandler) {
-                this.messageHandler(msg)
-              }
+      try {
+        // Create worker from CDN - using nmrugg version which has better Safari support
+        this.worker = new Worker('https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js')
+        
+        this.worker.onmessage = (e: MessageEvent) => {
+          const msg = String(e.data)
+          console.log('SF:', msg.substring(0, 60))
+          if (msg.includes('uciok') && !this.ready) {
+            this.ready = true
+            if (this.resolveReady) {
+              this.resolveReady(true)
+              this.resolveReady = null
             }
-            this.worker.postMessage('uci')
-            // Wait for uciok
-            setTimeout(() => {
-              if (this.ready && this.resolveReady) {
-                this.resolveReady(true)
-                this.resolveReady = null
-              }
-            }, 2000)
-          } else {
-            console.log('No stockfish worker created')
-            resolve(false)
           }
-        } catch (e) {
-          console.error('Stockfish init error:', e)
+        }
+        
+        this.worker.onerror = (e: ErrorEvent) => {
+          console.error('Stockfish worker error:', e)
           resolve(false)
         }
-      }
-      
-      script.onerror = (e) => {
-        console.error('Failed to load Stockfish script:', e)
+        
+        this.worker.postMessage('uci')
+        
+        // Wait for ready
+        setTimeout(() => {
+          if (this.ready && this.resolveReady) {
+            this.resolveReady(true)
+            this.resolveReady = null
+          } else if (this.resolveReady) {
+            // Try anyway if no error
+            this.ready = true
+            this.resolveReady(true)
+            this.resolveReady = null
+          }
+        }, 3000)
+        
+      } catch (e) {
+        console.error('Stockfish init error:', e)
         resolve(false)
       }
-      
-      document.head.appendChild(script)
     })
   }
 
   start(fen: string, depth: number, skillLevel: number, onMove: (move: string) => void) {
-    if (!this.worker || !this.ready) {
-      console.log('Stockfish not ready, using fallback')
+    if (!this.worker) {
+      console.log('Stockfish not available')
       return
     }
 
     console.log('Stockfish thinking... skill:', skillLevel, 'depth:', depth)
     
-    // Set skill level
     this.worker.postMessage('setoption name Skill Level value ' + skillLevel)
     this.worker.postMessage('position fen ' + fen)
     this.worker.postMessage('go depth ' + depth)
 
-    // Set up one-time message handler
-    const handler = (msg: string) => {
+    // Set up one-time handler
+    const handler = (e: MessageEvent) => {
+      const msg = String(e.data)
       if (msg.startsWith('bestmove')) {
         const move = msg.split(' ')[1]
         if (move && move !== '(none)') {
           console.log('Stockfish move:', move)
           onMove(move)
         }
-        // Remove handler after getting best move
-        this.messageHandler = null
+        // Remove listener
+        this.worker?.removeEventListener('message', handler)
       }
     }
-    this.messageHandler = handler
+    this.worker.addEventListener('message', handler)
   }
 
   isReady(): boolean {
